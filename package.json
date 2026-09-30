@@ -1,0 +1,19 @@
+{
+  "name": "kandy-wheelrider",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c yellow,cyan \"npm run dev --workspace @wheelrider/api\" \"npm run dev --workspace @wheelrider/client\"",
+    "build": "npm run build --workspace @wheelrider/client && npm run build --workspace @wheelrider/api",
+    "start": "npm run start --workspace @wheelrider/api",
+    "db:push": "npm run db:push --workspace @wheelrider/api",
+    "db:generate": "npm run db:generate --workspace @wheelrider/api"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
