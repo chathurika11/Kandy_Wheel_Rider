@@ -8,6 +8,12 @@ export interface VehicleImage {
   sortOrder: number
 }
 
+export interface VehicleBookedDate {
+  pickupDate: string
+  returnDate: string
+  status: BookingStatus
+}
+
 export interface Vehicle {
   id: string
   name: string
@@ -24,6 +30,7 @@ export interface Vehicle {
   status: VehicleStatus
   features: string[]
   images: VehicleImage[]
+  bookedDates?: VehicleBookedDate[]
   _count?: { bookings: number }
 }
 
@@ -38,6 +45,10 @@ export interface Booking {
   returnDate: string
   pickupLocation: string
   notes?: string | null
+  whatsappConsentAt?: string | null
+  fullRentalDays?: number | null
+  extraHours?: number | null
+  extraHourlyRate?: number | null
   totalAmount: number
   paymentSlipUrl?: string
   status: BookingStatus
@@ -46,7 +57,24 @@ export interface Booking {
   vehicle: Vehicle
 }
 
+export interface RentalSettings {
+  extraHourlyRate: number
+}
+
 export interface BookingConfirmation {
   booking: Booking
   bookingReference: string
+  notifications?: {
+    customer: { sent: boolean; error?: string }
+    admin: { sent: boolean; error?: string }
+  }
+}
+
+export interface AdminAuditEntry {
+  id: string
+  adminId: string
+  adminEmail: string
+  action: string
+  details: string | null
+  createdAt: string
 }

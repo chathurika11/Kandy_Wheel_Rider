@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { PrismaClient, BookingStatus, VehicleStatus } from '@prisma/client'
 import { z } from 'zod'
+import { sendBookingWhatsAppNotifications } from './whatsapp.js'
 
 const prisma = new PrismaClient()
 const app = express()
@@ -47,16 +48,26 @@ const upload = multer({
 
 type AdminRequest = Request & { admin?: { id: string; email: string } }
 
+async function recordAdminAction(request: Request, action: string, details?: string) {
+  const admin = (request as AdminRequest).admin
+  if (!admin) throw new Error('Administrator identity is unavailable for audit logging.')
+  await prisma.adminAuditLog.create({
+    data: { adminId: admin.id, adminEmail: admin.email, action, details },
+  })
+}
+
 function parseDate(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) throw new Error('Please provide a valid date.')
   return date
 }
 
-function rentalDays(pickupDate: Date, returnDate: Date) {
-  const days = Math.ceil((returnDate.getTime() - pickupDate.getTime()) / 86_400_000)
-  if (days < 1) throw new Error('The return date must be at least one day after pickup.')
-  return days
+function rentalDuration(pickupDate: Date, returnDate: Date) {
+  const durationMs = returnDate.getTime() - pickupDate.getTime()
+  const fullRentalDays = Math.floor(durationMs / 86_400_000)
+  if (durationMs < 86_400_000) throw new Error('The rental period must be at least 24 hours.')
+  const extraHours = Math.ceil((durationMs % 86_400_000) / 3_600_000)
+  return { fullRentalDays, extraHours }
 }
 
 async function vehicleIsAvailable(vehicleId: string, pickupDate: Date, returnDate: Date, excludeBookingId?: string) {
@@ -109,16 +120,26 @@ const vehicleInput = z.object({
 
 const bookingInput = z.object({
   customerName: z.string().trim().min(2).max(100),
-  contactNumber: z.string().trim().min(7).max(30),
+  contactNumber: z.string().trim().regex(/^\+?[1-9]\d{7,14}$/, 'Enter your WhatsApp number with country code, for example +94771234567.'),
   email: z.string().trim().email().max(100),
   nicOrPassport: z.string().trim().max(50).optional(),
   pickupDate: z.string().min(8),
   returnDate: z.string().min(8),
+  whatsappConsent: z.literal('true', { errorMap: () => ({ message: 'Please agree to receive booking updates by WhatsApp.' }) }),
   pickupLocation: z.string().trim().min(2).max(100),
   notes: z.string().trim().max(600).optional(),
 })
 
 app.get('/api/health', (_request, response) => response.json({ status: 'ok' }))
+
+app.get('/api/rental-settings', async (_request, response, next) => {
+  try {
+    const settings = await prisma.rentalSettings.findUniqueOrThrow({ where: { key: 'default' } })
+    return response.json({ settings: { extraHourlyRate: settings.extraHourlyRate } })
+  } catch (error) {
+    next(error)
+  }
+})
 
 app.get('/api/vehicles', async (request, response, next) => {
   try {
@@ -127,7 +148,7 @@ app.get('/api/vehicles', async (request, response, next) => {
     if ((startDate && !endDate) || (!startDate && endDate)) {
       return response.status(400).json({ message: 'Please select both rental dates.' })
     }
-    if (startDate && endDate) rentalDays(startDate, endDate)
+    if (startDate && endDate) rentalDuration(startDate, endDate)
 
     const vehicles = await prisma.vehicle.findMany({
       where: { status: VehicleStatus.AVAILABLE },
@@ -156,10 +177,21 @@ app.get('/api/vehicles/:vehicleId', async (request, response, next) => {
   try {
     const vehicle = await prisma.vehicle.findFirst({
       where: { id: request.params.vehicleId, status: VehicleStatus.AVAILABLE },
-      include: { images: { orderBy: { sortOrder: 'asc' } } },
+      include: {
+        images: { orderBy: { sortOrder: 'asc' } },
+        bookings: {
+          where: {
+            status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+            returnDate: { gt: new Date() },
+          },
+          select: { pickupDate: true, returnDate: true, status: true },
+          orderBy: { pickupDate: 'asc' },
+        },
+      },
     })
     if (!vehicle) return response.status(404).json({ message: 'This scooter is no longer available.' })
-    return response.json({ vehicle })
+    const { bookings, ...vehicleDetails } = vehicle
+    return response.json({ vehicle: { ...vehicleDetails, bookedDates: bookings } })
   } catch (error) {
     next(error)
   }
@@ -172,13 +204,16 @@ app.post('/api/bookings', upload.single('paymentSlip'), async (request, response
     const details = bookingInput.parse(request.body)
     const pickupDate = parseDate(details.pickupDate)
     const returnDate = parseDate(details.returnDate)
-    const days = rentalDays(pickupDate, returnDate)
+    const { fullRentalDays, extraHours } = rentalDuration(pickupDate, returnDate)
 
     const vehicle = await prisma.vehicle.findUnique({ where: { id: vehicleId } })
     if (!vehicle || !(await vehicleIsAvailable(vehicleId, pickupDate, returnDate))) {
+      if (request.file && existsSync(request.file.path)) unlinkSync(request.file.path)
       return response.status(409).json({ message: 'This scooter is not available for the selected dates.' })
     }
 
+    const settings = await prisma.rentalSettings.findUniqueOrThrow({ where: { key: 'default' } })
+    const totalAmount = fullRentalDays * vehicle.dailyRate + extraHours * settings.extraHourlyRate
     const booking = await prisma.booking.create({
       data: {
         vehicleId,
@@ -188,17 +223,34 @@ app.post('/api/bookings', upload.single('paymentSlip'), async (request, response
         nicOrPassport: details.nicOrPassport || undefined,
         pickupDate,
         returnDate,
+        whatsappConsentAt: new Date(),
         pickupLocation: details.pickupLocation,
         notes: details.notes || undefined,
-        totalAmount: days * vehicle.dailyRate,
+        fullRentalDays,
+        extraHours,
+        extraHourlyRate: settings.extraHourlyRate,
+        totalAmount,
         paymentSlipUrl: `/uploads/payments/${request.file.filename}`,
       },
       include: { vehicle: { include: { images: { orderBy: { sortOrder: 'asc' } } } } },
     })
 
     const { paymentSlipUrl: _paymentSlipUrl, ...customerBooking } = booking
-    return response.status(201).json({ booking: customerBooking, bookingReference: `KWR-${booking.id.slice(-6).toUpperCase()}` })
+    const bookingReference = `KWR-${booking.id.slice(-6).toUpperCase()}`
+    const notifications = await sendBookingWhatsAppNotifications({
+      bookingReference,
+      customerName: booking.customerName,
+      customerNumber: booking.contactNumber,
+      scooterName: booking.vehicle.name,
+      pickupDate: booking.pickupDate,
+      returnDate: booking.returnDate,
+      totalAmount: booking.totalAmount,
+    })
+    if (!notifications.customer.sent) console.error('Customer WhatsApp booking notification failed.', notifications.customer.error)
+    if (!notifications.admin.sent) console.error('Admin WhatsApp booking notification failed.', notifications.admin.error)
+    return response.status(201).json({ booking: customerBooking, bookingReference, notifications })
   } catch (error) {
+    if (request.file && existsSync(request.file.path)) unlinkSync(request.file.path)
     next(error)
   }
 })
@@ -212,6 +264,9 @@ app.post('/api/admin/login', async (request, response, next) => {
     }
     const secret = process.env.JWT_SECRET
     if (!secret) return response.status(500).json({ message: 'JWT_SECRET is not configured on the server.' })
+    await prisma.adminAuditLog.create({
+      data: { adminId: admin.id, adminEmail: admin.email, action: 'LOGIN', details: 'Signed in to the admin panel.' },
+    })
     const token = jwt.sign({ email: admin.email }, secret, { subject: admin.id, expiresIn: '12h' })
     return response.json({ token, admin: { email: admin.email } })
   } catch (error) {
@@ -231,9 +286,45 @@ app.get('/api/admin/vehicles', requireAdmin, async (_request, response, next) =>
   }
 })
 
+app.get('/api/admin/audit-logs', requireAdmin, async (_request, response, next) => {
+  try {
+    const entries = await prisma.adminAuditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 100 })
+    return response.json({ entries })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.put('/api/admin/rental-settings', requireAdmin, async (request, response, next) => {
+  try {
+    const { extraHourlyRate } = z.object({
+      extraHourlyRate: z.number().int().min(0).max(1_000_000),
+    }).parse(request.body)
+    const settings = await prisma.rentalSettings.upsert({
+      where: { key: 'default' },
+      create: { key: 'default', extraHourlyRate },
+      update: { extraHourlyRate },
+    })
+    await recordAdminAction(request, 'RENTAL_RATE_UPDATED', `Set the extra hourly rental rate to LKR ${extraHourlyRate}.`)
+    return response.json({ settings: { extraHourlyRate: settings.extraHourlyRate } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post('/api/admin/logout', requireAdmin, async (request, response, next) => {
+  try {
+    await recordAdminAction(request, 'LOGOUT', 'Signed out of the admin panel.')
+    return response.status(204).end()
+  } catch (error) {
+    next(error)
+  }
+})
+
 app.post('/api/admin/vehicles', requireAdmin, async (request, response, next) => {
   try {
     const vehicle = await prisma.vehicle.create({ data: vehicleInput.parse(request.body) })
+    await recordAdminAction(request, 'VEHICLE_CREATED', `Added scooter "${vehicle.name}" (${vehicle.id}).`)
     return response.status(201).json({ vehicle })
   } catch (error) {
     next(error)
@@ -243,8 +334,12 @@ app.post('/api/admin/vehicles', requireAdmin, async (request, response, next) =>
 app.patch('/api/admin/vehicles/:vehicleId', requireAdmin, async (request, response, next) => {
   try {
     const vehicleId = z.string().min(1).parse(request.params.vehicleId)
-    const changes = vehicleInput.partial().parse(request.body)
+    const changes = vehicleInput.partial().refine((value) => Object.keys(value).length > 0, 'Provide at least one field to update.').parse(request.body)
+    const existing = await prisma.vehicle.findUnique({ where: { id: vehicleId } })
+    if (!existing) return response.status(404).json({ message: 'Scooter not found.' })
     const vehicle = await prisma.vehicle.update({ where: { id: vehicleId }, data: changes })
+    const updatedFields = Object.keys(changes).join(', ')
+    await recordAdminAction(request, 'VEHICLE_UPDATED', `Updated scooter "${vehicle.name}" (${vehicle.id}); fields: ${updatedFields}.`)
     return response.json({ vehicle })
   } catch (error) {
     next(error)
@@ -254,10 +349,13 @@ app.patch('/api/admin/vehicles/:vehicleId', requireAdmin, async (request, respon
 app.delete('/api/admin/vehicles/:vehicleId', requireAdmin, async (request, response, next) => {
   try {
     const vehicleId = z.string().min(1).parse(request.params.vehicleId)
+    const vehicle = await prisma.vehicle.findUnique({ where: { id: vehicleId } })
+    if (!vehicle) return response.status(404).json({ message: 'Scooter not found.' })
     const bookingCount = await prisma.booking.count({ where: { vehicleId } })
     if (bookingCount) return response.status(409).json({ message: 'Vehicles with booking history cannot be deleted. Set them to inactive instead.' })
     await prisma.vehicleImage.deleteMany({ where: { vehicleId } })
     await prisma.vehicle.delete({ where: { id: vehicleId } })
+    await recordAdminAction(request, 'VEHICLE_DELETED', `Deleted scooter "${vehicle.name}" (${vehicle.id}).`)
     return response.status(204).end()
   } catch (error) {
     next(error)
@@ -280,6 +378,7 @@ app.post('/api/admin/vehicles/:vehicleId/images', requireAdmin, upload.array('im
         sortOrder: currentImageCount + index,
       },
     })))
+    await recordAdminAction(request, 'VEHICLE_PHOTOS_UPLOADED', `Uploaded ${images.length} photo(s) for scooter "${vehicle.name}" (${vehicle.id}).`)
     return response.status(201).json({ images })
   } catch (error) {
     next(error)
@@ -295,6 +394,7 @@ app.delete('/api/admin/vehicles/:vehicleId/images/:imageId', requireAdmin, async
     await prisma.vehicleImage.delete({ where: { id: image.id } })
     const filePath = path.resolve(uploadsPath, `.${image.url.replace('/uploads', '')}`)
     if (filePath.startsWith(uploadsPath) && existsSync(filePath)) unlinkSync(filePath)
+    await recordAdminAction(request, 'VEHICLE_PHOTO_DELETED', `Deleted a photo from scooter "${vehicleId}".`)
     return response.status(204).end()
   } catch (error) {
     next(error)
@@ -320,6 +420,7 @@ app.get('/api/admin/bookings/:bookingId/payment-slip', requireAdmin, async (requ
     if (!booking) return response.status(404).json({ message: 'Booking not found.' })
     const filePath = path.resolve(paymentUploadsPath, path.basename(booking.paymentSlipUrl))
     if (!existsSync(filePath)) return response.status(404).json({ message: 'Payment slip file not found.' })
+    await recordAdminAction(request, 'PAYMENT_SLIP_VIEWED', `Opened payment proof for booking "${bookingId}".`)
     return response.sendFile(filePath)
   } catch (error) {
     next(error)
@@ -339,6 +440,9 @@ app.patch('/api/admin/bookings/:bookingId', requireAdmin, async (request, respon
       return response.status(409).json({ message: 'This scooter is no longer available for the requested dates.' })
     }
     const booking = await prisma.booking.update({ where: { id: existing.id }, data: change })
+    if (change.status && change.status !== existing.status) {
+      await recordAdminAction(request, 'BOOKING_STATUS_CHANGED', `Changed booking "${booking.id}" status from ${existing.status} to ${booking.status}.`)
+    }
     return response.json({ booking })
   } catch (error) {
     next(error)
@@ -357,6 +461,11 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 
 async function bootstrap() {
   await prisma.$connect()
+  await prisma.rentalSettings.upsert({
+    where: { key: 'default' },
+    create: { key: 'default', extraHourlyRate: 0 },
+    update: {},
+  })
   const email = process.env.ADMIN_EMAIL?.trim().toLowerCase()
   const password = process.env.ADMIN_PASSWORD
   if (email && password) {

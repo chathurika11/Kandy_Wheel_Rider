@@ -28,6 +28,22 @@ model AdminUser {
   updatedAt    DateTime @updatedAt
 }
 
+model AdminAuditLog {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  adminId    String   @db.ObjectId
+  adminEmail String
+  action     String
+  details    String?
+  createdAt  DateTime @default(now())
+}
+
+model RentalSettings {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  key             String   @unique @default("default")
+  extraHourlyRate Float    @default(0)
+  updatedAt       DateTime @updatedAt
+}
+
 model Vehicle {
   id           String        @id @default(auto()) @map("_id") @db.ObjectId
   name         String
@@ -71,6 +87,10 @@ model Booking {
   returnDate     DateTime
   pickupLocation String
   notes          String?
+  whatsappConsentAt DateTime?
+  fullRentalDays Int?
+  extraHours     Int?
+  extraHourlyRate Float?
   totalAmount    Float
   paymentSlipUrl String
   status         BookingStatus @default(PENDING)

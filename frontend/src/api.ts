@@ -1,4 +1,4 @@
-import type { Booking, BookingConfirmation, BookingStatus, Vehicle, VehicleStatus } from './types'
+import type { AdminAuditEntry, Booking, BookingConfirmation, BookingStatus, RentalSettings, Vehicle, VehicleStatus } from './types'
 
 const apiBaseUrl = import.meta.env.VITE_API_URL || '/api'
 
@@ -38,11 +38,17 @@ export const api = {
     }
     return request<{ vehicles: Vehicle[] }>(`/vehicles${params.size ? `?${params}` : ''}`)
   },
+  getRentalSettings: (token?: string) => request<{ settings: RentalSettings }>('/rental-settings', { token }),
   getVehicle: (id: string) => request<{ vehicle: Vehicle }>(`/vehicles/${id}`),
   createBooking: (form: FormData) => request<BookingConfirmation>('/bookings', { method: 'POST', body: form }),
   login: (email: string, password: string) => request<{ token: string; admin: { email: string } }>('/admin/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+  }),
+  logout: (token: string) => request<void>('/admin/logout', { method: 'POST', token }),
+  getAdminAuditLogs: (token: string) => request<{ entries: AdminAuditEntry[] }>('/admin/audit-logs', { token }),
+  updateRentalSettings: (token: string, settings: RentalSettings) => request<{ settings: RentalSettings }>('/admin/rental-settings', {
+    method: 'PUT', token, body: JSON.stringify(settings),
   }),
   getAdminVehicles: (token: string) => request<{ vehicles: Vehicle[] }>('/admin/vehicles', { token }),
   createVehicle: (token: string, vehicle: Omit<Vehicle, 'id' | 'images'>) => request<{ vehicle: Vehicle }>('/admin/vehicles', {

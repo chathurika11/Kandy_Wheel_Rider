@@ -1,6 +1,7 @@
-import { Menu, X, Zap } from 'lucide-react'
+import { Menu, X } from 'lucide-react'
 import { useState } from 'react'
 import { Link, NavLink } from 'react-router-dom'
+import logo from '../img/logo.jpeg'
 
 export function Header() {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -10,7 +11,7 @@ export function Header() {
     <header className="site-header">
       <div className="container nav-wrap">
         <Link className="brand" to="/" onClick={closeMenu} aria-label="Kandy WheelRider home">
-          <span className="brand-mark"><Zap size={18} fill="currentColor" /></span>
+          <img className="brand-logo" src={logo} alt="" />
           <span>Kandy <strong>WheelRider</strong></span>
         </Link>
         <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Toggle navigation">

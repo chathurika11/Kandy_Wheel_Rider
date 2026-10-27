@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, CalendarDays, Camera, Check, ChevronLeft, Chevro
 import { useEffect, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, assetUrl } from '../api'
+import { BookedCalendar } from '../components/BookedCalendar'
 import { PageLoader } from '../components/PageLoader'
 import type { Vehicle } from '../types'
 import { formatCurrency } from '../utils'
@@ -52,6 +53,7 @@ export function VehicleDetail() {
             <span><UsersRound size={19} /><b>{vehicle.seats}</b><small>{vehicle.seats === 1 ? 'Rider' : 'Riders'}</small></span>
             <span><MapPin size={19} /><b>{vehicle.location}</b><small>Pickup area</small></span>
           </div>
+          <BookedCalendar bookedDates={vehicle.bookedDates ?? []} />
           <div className="detail-price"><div><span>From</span><strong>{formatCurrency(vehicle.dailyRate)}</strong><span>per day</span></div><Link className="button button-primary" to={`/vehicles/${vehicle.id}/book${bookingSearch}`}>Book now <ArrowRight size={18} /></Link></div>
           <p className="booking-hint"><CalendarDays size={16} /> Select your dates on the next step, then send your booking request.</p>
         </div>
