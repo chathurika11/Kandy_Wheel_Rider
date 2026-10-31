@@ -1,17 +1,12 @@
 export type VehicleStatus = 'AVAILABLE' | 'MAINTENANCE' | 'INACTIVE'
-export type BookingStatus = 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'CANCELLED'
+export type ServiceListingCategory = 'CAMPING_GADGET' | 'TOUR_GUIDE'
+export type ServiceListingStatus = 'AVAILABLE' | 'UNAVAILABLE'
 
 export interface VehicleImage {
   id: string
   url: string
   alt: string
   sortOrder: number
-}
-
-export interface VehicleBookedDate {
-  pickupDate: string
-  returnDate: string
-  status: BookingStatus
 }
 
 export interface Vehicle {
@@ -30,44 +25,27 @@ export interface Vehicle {
   status: VehicleStatus
   features: string[]
   images: VehicleImage[]
-  bookedDates?: VehicleBookedDate[]
-  _count?: { bookings: number }
 }
 
-export interface Booking {
+export interface ServiceListingImage {
   id: string
-  vehicleId: string
-  customerName: string
-  contactNumber: string
-  email: string
-  nicOrPassport?: string | null
-  pickupDate: string
-  returnDate: string
-  pickupLocation: string
-  notes?: string | null
-  whatsappConsentAt?: string | null
-  fullRentalDays?: number | null
-  extraHours?: number | null
-  extraHourlyRate?: number | null
-  totalAmount: number
-  paymentSlipUrl?: string
-  status: BookingStatus
-  adminNotes?: string | null
+  url: string
+  alt: string
+  sortOrder: number
+}
+
+export interface ServiceListing {
+  id: string
+  category: ServiceListingCategory
+  name: string
+  description: string
+  price: number
+  priceUnit: string
+  details: string[]
+  status: ServiceListingStatus
+  images: ServiceListingImage[]
   createdAt: string
-  vehicle: Vehicle
-}
-
-export interface RentalSettings {
-  extraHourlyRate: number
-}
-
-export interface BookingConfirmation {
-  booking: Booking
-  bookingReference: string
-  notifications?: {
-    customer: { sent: boolean; error?: string }
-    admin: { sent: boolean; error?: string }
-  }
+  updatedAt: string
 }
 
 export interface AdminAuditEntry {

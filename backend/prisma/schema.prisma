@@ -20,6 +20,16 @@ enum BookingStatus {
   CANCELLED
 }
 
+enum ServiceListingCategory {
+  CAMPING_GADGET
+  TOUR_GUIDE
+}
+
+enum ServiceListingStatus {
+  AVAILABLE
+  UNAVAILABLE
+}
+
 model AdminUser {
   id           String   @id @default(auto()) @map("_id") @db.ObjectId
   email        String   @unique
@@ -73,6 +83,30 @@ model VehicleImage {
   alt       String
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
+}
+
+model ServiceListing {
+  id          String                  @id @default(auto()) @map("_id") @db.ObjectId
+  category    ServiceListingCategory
+  name        String
+  description String
+  price       Float
+  priceUnit   String                  @default("day")
+  details     String[]
+  status      ServiceListingStatus    @default(AVAILABLE)
+  images      ServiceListingImage[]
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+}
+
+model ServiceListingImage {
+  id        String         @id @default(auto()) @map("_id") @db.ObjectId
+  listingId String         @db.ObjectId
+  listing   ServiceListing @relation(fields: [listingId], references: [id])
+  url       String
+  alt       String
+  sortOrder Int            @default(0)
+  createdAt DateTime       @default(now())
 }
 
 model Booking {

@@ -8,7 +8,7 @@ import multer from 'multer'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
-import { PrismaClient, BookingStatus, VehicleStatus } from '@prisma/client'
+import { PrismaClient, BookingStatus, ServiceListingCategory, ServiceListingStatus, VehicleStatus } from '@prisma/client'
 import { z } from 'zod'
 import { sendBookingWhatsAppNotifications } from './whatsapp.js'
 
@@ -17,19 +17,24 @@ const app = express()
 const port = Number(process.env.PORT ?? 4000)
 const uploadsPath = path.resolve(process.cwd(), 'uploads')
 const vehicleUploadsPath = path.join(uploadsPath, 'vehicles')
+const listingUploadsPath = path.join(uploadsPath, 'listings')
 const paymentUploadsPath = path.join(uploadsPath, 'payments')
 
-for (const directory of [uploadsPath, vehicleUploadsPath, paymentUploadsPath]) {
+for (const directory of [uploadsPath, vehicleUploadsPath, listingUploadsPath, paymentUploadsPath]) {
   if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
 }
 
 app.use(cors())
 app.use(express.json({ limit: '1mb' }))
 app.use('/uploads/vehicles', express.static(vehicleUploadsPath))
+app.use('/uploads/listings', express.static(listingUploadsPath))
 
 const storage = multer.diskStorage({
   destination: (_request, file, callback) => {
-    callback(null, file.fieldname === 'paymentSlip' ? paymentUploadsPath : vehicleUploadsPath)
+    const destination = file.fieldname === 'paymentSlip'
+      ? paymentUploadsPath
+      : file.fieldname === 'listingImages' ? listingUploadsPath : vehicleUploadsPath
+    callback(null, destination)
   },
   filename: (_request, file, callback) => {
     callback(null, `${randomUUID()}${path.extname(file.originalname).toLowerCase()}`)
@@ -118,6 +123,15 @@ const vehicleInput = z.object({
   features: z.array(z.string().trim().min(1).max(80)).max(20).default([]),
 })
 
+const serviceListingInput = z.object({
+  name: z.string().trim().min(2).max(100),
+  description: z.string().trim().min(10).max(2000),
+  price: z.number().positive().max(10_000_000),
+  priceUnit: z.string().trim().min(2).max(30),
+  details: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
+  status: z.nativeEnum(ServiceListingStatus).default(ServiceListingStatus.AVAILABLE),
+})
+
 const bookingInput = z.object({
   customerName: z.string().trim().min(2).max(100),
   contactNumber: z.string().trim().regex(/^\+?[1-9]\d{7,14}$/, 'Enter your WhatsApp number with country code, for example +94771234567.'),
@@ -136,6 +150,20 @@ app.get('/api/rental-settings', async (_request, response, next) => {
   try {
     const settings = await prisma.rentalSettings.findUniqueOrThrow({ where: { key: 'default' } })
     return response.json({ settings: { extraHourlyRate: settings.extraHourlyRate } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/listings/:category', async (request, response, next) => {
+  try {
+    const category = z.nativeEnum(ServiceListingCategory).parse(request.params.category)
+    const listings = await prisma.serviceListing.findMany({
+      where: { category, status: ServiceListingStatus.AVAILABLE },
+      include: { images: { orderBy: { sortOrder: 'asc' } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    return response.json({ listings })
   } catch (error) {
     next(error)
   }
@@ -197,7 +225,7 @@ app.get('/api/vehicles/:vehicleId', async (request, response, next) => {
   }
 })
 
-app.post('/api/bookings', upload.single('paymentSlip'), async (request, response, next) => {
+app.post('/api/bookings', requireAdmin, upload.single('paymentSlip'), async (request, response, next) => {
   try {
     if (!request.file) return response.status(400).json({ message: 'Please attach your payment slip.' })
     const vehicleId = z.string().min(1).parse(request.body.vehicleId)
@@ -281,6 +309,112 @@ app.get('/api/admin/vehicles', requireAdmin, async (_request, response, next) =>
       orderBy: { createdAt: 'desc' },
     })
     return response.json({ vehicles })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/admin/listings/:category', requireAdmin, async (request, response, next) => {
+  try {
+    const category = z.nativeEnum(ServiceListingCategory).parse(request.params.category)
+    const listings = await prisma.serviceListing.findMany({
+      where: { category },
+      include: { images: { orderBy: { sortOrder: 'asc' } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    return response.json({ listings })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post('/api/admin/listings/:category', requireAdmin, async (request, response, next) => {
+  try {
+    const category = z.nativeEnum(ServiceListingCategory).parse(request.params.category)
+    const listing = await prisma.serviceListing.create({
+      data: { ...serviceListingInput.parse(request.body), category },
+      include: { images: true },
+    })
+    await recordAdminAction(request, 'SERVICE_LISTING_CREATED', `Added ${category === ServiceListingCategory.CAMPING_GADGET ? 'camping gadget' : 'tour guide'} "${listing.name}" (${listing.id}).`)
+    return response.status(201).json({ listing })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.patch('/api/admin/listings/:listingId', requireAdmin, async (request, response, next) => {
+  try {
+    const listingId = z.string().min(1).parse(request.params.listingId)
+    const changes = serviceListingInput.partial().refine((value) => Object.keys(value).length > 0, 'Provide at least one field to update.').parse(request.body)
+    const existing = await prisma.serviceListing.findUnique({ where: { id: listingId } })
+    if (!existing) return response.status(404).json({ message: 'Listing not found.' })
+    const listing = await prisma.serviceListing.update({
+      where: { id: listingId },
+      data: changes,
+      include: { images: { orderBy: { sortOrder: 'asc' } } },
+    })
+    await recordAdminAction(request, 'SERVICE_LISTING_UPDATED', `Updated "${listing.name}" (${listing.id}); fields: ${Object.keys(changes).join(', ')}.`)
+    return response.json({ listing })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.delete('/api/admin/listings/:listingId', requireAdmin, async (request, response, next) => {
+  try {
+    const listingId = z.string().min(1).parse(request.params.listingId)
+    const listing = await prisma.serviceListing.findUnique({
+      where: { id: listingId },
+      include: { images: true },
+    })
+    if (!listing) return response.status(404).json({ message: 'Listing not found.' })
+    await prisma.serviceListingImage.deleteMany({ where: { listingId } })
+    await prisma.serviceListing.delete({ where: { id: listingId } })
+    for (const image of listing.images) {
+      const filePath = path.resolve(uploadsPath, `.${image.url.replace('/uploads', '')}`)
+      if (filePath.startsWith(listingUploadsPath) && existsSync(filePath)) unlinkSync(filePath)
+    }
+    await recordAdminAction(request, 'SERVICE_LISTING_DELETED', `Deleted "${listing.name}" (${listing.id}).`)
+    return response.status(204).end()
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post('/api/admin/listings/:listingId/images', requireAdmin, upload.array('listingImages', 8), async (request, response, next) => {
+  try {
+    const listingId = z.string().min(1).parse(request.params.listingId)
+    const listing = await prisma.serviceListing.findUnique({ where: { id: listingId } })
+    if (!listing) return response.status(404).json({ message: 'Listing not found.' })
+    const files = request.files as Express.Multer.File[] | undefined
+    if (!files?.length) return response.status(400).json({ message: 'Please select at least one JPEG, PNG, or WebP image.' })
+    const currentImageCount = await prisma.serviceListingImage.count({ where: { listingId } })
+    const images = await Promise.all(files.map((file, index) => prisma.serviceListingImage.create({
+      data: {
+        listingId,
+        url: `/uploads/listings/${file.filename}`,
+        alt: listing.name,
+        sortOrder: currentImageCount + index,
+      },
+    })))
+    await recordAdminAction(request, 'SERVICE_LISTING_PHOTOS_UPLOADED', `Uploaded ${images.length} photo(s) for "${listing.name}" (${listing.id}).`)
+    return response.status(201).json({ images })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.delete('/api/admin/listings/:listingId/images/:imageId', requireAdmin, async (request, response, next) => {
+  try {
+    const listingId = z.string().min(1).parse(request.params.listingId)
+    const imageId = z.string().min(1).parse(request.params.imageId)
+    const image = await prisma.serviceListingImage.findFirst({ where: { id: imageId, listingId } })
+    if (!image) return response.status(404).json({ message: 'Listing image not found.' })
+    await prisma.serviceListingImage.delete({ where: { id: image.id } })
+    const filePath = path.resolve(uploadsPath, `.${image.url.replace('/uploads', '')}`)
+    if (filePath.startsWith(listingUploadsPath) && existsSync(filePath)) unlinkSync(filePath)
+    await recordAdminAction(request, 'SERVICE_LISTING_PHOTO_DELETED', `Deleted a photo from listing "${listingId}".`)
+    return response.status(204).end()
   } catch (error) {
     next(error)
   }
